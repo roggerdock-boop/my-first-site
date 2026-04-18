@@ -6,6 +6,8 @@ import { z } from "zod";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
 import { aiRouter } from "./routers-ai";
+import { invokeLLM } from "./_core/llm";
+import { getCementArticleBySlug, listCementArticles, upsertCementArticle } from "./cementStore";
 
 // Helper to generate URL-friendly slugs
 function generateSlug(title: string): string {
@@ -18,6 +20,77 @@ function generateSlug(title: string): string {
 }
 
 export const appRouter = router({
+  cement: router({
+    articles: router({
+      list: publicProcedure
+        .input(z.object({ category: z.string().optional() }).optional())
+        .query(async ({ input }) => {
+          return listCementArticles(input?.category);
+        }),
+      bySlug: publicProcedure
+        .input(z.object({ slug: z.string() }))
+        .query(async ({ input }) => {
+          const article = await getCementArticleBySlug(input.slug);
+          if (!article) throw new TRPCError({ code: "NOT_FOUND" });
+          return article;
+        }),
+      upsert: publicProcedure
+        .input(
+          z.object({
+            adminKey: z.string(),
+            id: z.string().optional(),
+            slug: z.string().min(2),
+            title: z.string().min(4),
+            excerpt: z.string().min(10),
+            content: z.string().min(30),
+            category: z.enum(["Raw Mill", "Kiln", "Cement Mill", "Optimization"]),
+            seoTitle: z.string().min(10),
+            seoDescription: z.string().min(20),
+            tags: z.array(z.string()).default([]),
+          })
+        )
+        .mutation(async ({ input }) => {
+          if (input.adminKey !== (process.env.CEMENT_ADMIN_KEY || "cement-admin-2026")) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid admin key" });
+          }
+
+          return upsertCementArticle({
+            id: input.id,
+            slug: input.slug,
+            title: input.title,
+            excerpt: input.excerpt,
+            content: input.content,
+            category: input.category,
+            seoTitle: input.seoTitle,
+            seoDescription: input.seoDescription,
+            tags: input.tags,
+          });
+        }),
+    }),
+    chat: publicProcedure
+      .input(z.object({ mode: z.enum(["general", "expert"]), messages: z.array(z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string() })) }))
+      .mutation(async ({ input }) => {
+        const system =
+          input.mode === "expert"
+            ? "You are a cement process optimization expert. Give practical, safe, plant-focused recommendations with formulas and checklist steps."
+            : "You are a helpful industrial assistant.";
+
+        try {
+          const response = await invokeLLM({
+            messages: [{ role: "system", content: system }, ...input.messages],
+            maxTokens: 500,
+          });
+          const content = response.choices?.[0]?.message?.content;
+          return { reply: typeof content === "string" ? content : "I could not generate a response." };
+        } catch {
+          const fallback =
+            input.mode === "expert"
+              ? "Quick expert tip: first stabilize kiln feed and draft, then optimize fuel. Track SHC, kiln exit O2, and false air trend daily."
+              : "I'm currently offline. Please try again in a moment.";
+          return { reply: fallback };
+        }
+      }),
+  }),
   system: systemRouter,
   ai: aiRouter,
   auth: router({
